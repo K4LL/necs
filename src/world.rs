@@ -1,10 +1,10 @@
 use std::any::TypeId;
 use std::ptr::NonNull;
 
-use slotmap::{ DenseSlotMap, Key };
+use slotmap::{DenseSlotMap, Key};
 
-use crate::common::{ ComponentSignature, TypeMetadata, Entity, EntityPointer };
-use crate::archetype::{ Archetype, ArchetypeId };
+use crate::archetype::{Archetype, ArchetypeId};
+use crate::common::{ComponentSignature, Entity, EntityPointer, TypeMetadata};
 
 pub struct World {
     component_signatures: Vec<(ComponentSignature, TypeMetadata)>,
@@ -27,7 +27,9 @@ impl World {
             .map(|(sig, _)| *sig)
     }
 
-    pub(crate) fn get_or_create_signature_for_component<T: 'static>(&mut self) -> ComponentSignature {
+    pub(crate) fn get_or_create_signature_for_component<T: 'static>(
+        &mut self,
+    ) -> ComponentSignature {
         let type_id = TypeId::of::<T>();
 
         self.component_signatures
@@ -48,23 +50,32 @@ impl World {
     }
 
     fn create_archetype(&mut self, layout: Vec<(ComponentSignature, u32)>) -> ArchetypeId {
+        // This function expects a sorted layout
         assert!(
             layout.is_sorted(),
             "Layout is not sorted. Use create_archetype_and_sort instead"
         );
 
+        // Create a new archetype and push it to the archetype array
         let new_archetype = Archetype::new(self, layout);
         self.archetypes.push(new_archetype);
 
+        // Return its index
         self.archetypes.len() as ArchetypeId - 1
     }
     fn create_archetype_and_sort(
         &mut self,
         mut layout: Vec<(ComponentSignature, u32)>,
     ) -> ArchetypeId {
+        // Sort the layout
+        // Here it is safe to use unstable because a layout shouldn't have the same component twice
         layout.sort_unstable();
-        self.archetypes.push(Archetype::new(self, layout));
 
+        // Create a new archetype and push it to the archetype array
+        let new_archetype = Archetype::new(self, layout);
+        self.archetypes.push(new_archetype);
+
+        // Return its index
         self.archetypes.len() as ArchetypeId - 1
     }
 
@@ -74,19 +85,28 @@ impl World {
     ) -> ArchetypeId {
         let new_component_signature = self.get_or_create_signature_for_component::<T>();
 
+        // Get a reference to the archetype the entity is currently in
         let current_archetype = self
             .archetypes
             .get(current_archetype_id)
             .expect("Failed to get archetype from current id");
 
+        // Create a new component layout
+        // It will be the same as the old but with one more component, so clone is used
         let mut new_component_layout = current_archetype.component_layout.clone();
 
+        // Push the new component layout alongside its signature and index
         new_component_layout.push((
             new_component_signature,
             current_archetype.component_storages.len() as u32,
         ));
+        // Sort the layout
+        // Here it is safe to use unstable because a layout shouldn't have the same component twice
         new_component_layout.sort_unstable();
 
+        // Try to find an archetype with the new layout
+        // If it does not exist, create a new one
+        // Return the Id of the found/new archetype
         self.archetypes
             .iter()
             .position(|archetype| archetype.component_layout == new_component_layout)
@@ -95,20 +115,28 @@ impl World {
     }
 
     fn delete_entity_from_archetype_using_pointer(&mut self, entity_ptr: EntityPointer) {
-        let archetype = unsafe { self.archetypes.get_unchecked_mut(entity_ptr.archetype as usize) };
+        // Get the archetype the entity is currently in
+        let archetype = unsafe {
+            self.archetypes
+                .get_unchecked_mut(entity_ptr.archetype as usize)
+        };
+        // Remove the entity from the archetype
         archetype.remove_entity_swap(entity_ptr.index);
 
+        // Try to get the last element from the archetype, returning if the archetype is empty
         let last_archetype_entity_ptr = archetype.entity_storages.last();
         if last_archetype_entity_ptr.is_none() {
             return;
         }
 
         unsafe {
+            // Get the last archetype entity 'Entity' by using the key inside the entity
             let last_archetype_entity_slot = {
                 self.entities
                     .get_mut(last_archetype_entity_ptr.unwrap_unchecked().0)
                     .expect("Last archetype entity not found on world storage")
             };
+            // Update the last entity position
             last_archetype_entity_slot.index = last_archetype_entity_ptr.unwrap_unchecked().1;
         }
     }
@@ -141,6 +169,7 @@ impl World {
             type_id: TypeId::of::<T>(),
         };
 
+        // If the component is already registered, return the signature
         if let Some((signature, _)) = self
             .component_signatures
             .iter()
@@ -149,6 +178,7 @@ impl World {
             return *signature;
         }
 
+        // If the component is not registered, register it
         let new_signature = self.component_signatures.len() as ComponentSignature;
         self.component_signatures
             .push((new_signature, type_metadata));
@@ -198,9 +228,11 @@ impl World {
             .get(entity)
             .expect("Could not find entity pointer for the given entity");
 
+        // Get or create an archetype that fits the entity
         let new_archetype_id =
             self.find_or_create_archetype_with_component::<T>(entity_pointer.archetype as usize);
 
+        // Get the position of the entity components within the now old archetype
         let old_components_position = self
             .archetypes
             .get(entity_pointer.archetype as usize)
@@ -210,37 +242,45 @@ impl World {
             .unwrap()
             .1;
 
-        let mut new_components = Vec::new();
+        // Create an array with the begin iterator and signature of each component
+        // These will be later copied into the new archetype
+        let mut copy_list = Vec::new();
+        // Iterate over the component storages
+        for storage in self
+            .archetypes
+            .get(entity_pointer.archetype as usize)
+            .unwrap()
+            .component_storages
+            .iter()
         {
-            for storage in self
-                .archetypes
-                .get(entity_pointer.archetype as usize)
-                .unwrap()
-                .component_storages
-                .iter()
-            {
-                let old_component_begin = NonNull::from_ref(
-                    storage
-                        .get(old_components_position)
-                        .expect("Failed to get old component from archetype"),
-                );
-                new_components.push((old_component_begin, storage.signature()));
-            }
+            // Get the begin iterator within the now old storage
+            let old_component_begin = NonNull::from_ref(
+                storage
+                    .get(old_components_position)
+                    .expect("Failed to get old component from archetype"),
+            );
+            // Push the begin iterator alongside the component signature to the copy list
+            copy_list.push((old_component_begin, storage.signature()));
         }
 
+        // Get the begin iterator for the new component and push it into the copy list
         let new_component_begin = NonNull::from_ref(&component).cast::<u8>();
-        new_components.push((
+        copy_list.push((
             new_component_begin,
             self.get_or_create_signature_for_component::<T>(),
         ));
 
+        // Add the entity to its new archetype, consuming the copy list
         self.archetypes
             .get_mut(new_archetype_id as usize)
             .unwrap()
-            .add_entity(entity, new_components);
+            .add_entity(entity, copy_list);
 
+        // Update the entity handles
         unsafe {
+            // Point the Entity to the new archetype
             self.entities.get_unchecked_mut(entity).archetype = new_archetype_id;
+            // Point the Entity to its updated index
             self.entities.get_unchecked_mut(entity).index = self
                 .archetypes
                 .get_unchecked_mut(new_archetype_id as usize)
@@ -273,10 +313,12 @@ impl World {
             .expect("Component is not registered");
 
         for component_storage in archetype.component_storages.iter() {
+            // If the found storage isn't the needed storage, continue
             if component_storage.signature() != component_signature {
                 continue;
             }
 
+            // If the found storage is the one needed, return a reference to the component inside it
             return component_storage
                 .get(component_position.1)
                 .expect("Component not found for given index");

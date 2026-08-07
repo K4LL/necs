@@ -1,4 +1,4 @@
-use slotmap::{new_key_type};
+use slotmap::new_key_type;
 use std::any::TypeId;
 
 pub(crate) type ComponentSignature = u32;

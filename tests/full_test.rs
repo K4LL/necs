@@ -1,4 +1,4 @@
-use::necs::{ World, Entity };
+use ::necs::{Entity, World};
 
 #[test]
 fn full_test() {
