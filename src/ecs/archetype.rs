@@ -1,8 +1,9 @@
 use std::ptr::NonNull;
 
-use crate::common::{ComponentSignature, Entity, EntityStorageId};
-use crate::component_storage::ComponentStorage;
-use crate::world::World;
+use crate::ecs::common::__Internals;
+use crate::ecs::common::{ComponentMask, ComponentMetadata, Entity, EntityStorageId};
+use crate::ecs::component_storage::ComponentStorage;
+use crate::ecs::world::World;
 
 pub(crate) type ArchetypeId = u32;
 
@@ -11,39 +12,42 @@ pub(crate) struct Archetype {
     pub entity_storages: Vec<(Entity, EntityStorageId)>,
     pub component_storages: std::vec::Vec<ComponentStorage>,
     // (component_signature, index)
-    pub component_layout: std::vec::Vec<(ComponentSignature, u32)>,
+    pub component_layout: std::vec::Vec<(ComponentMetadata, u32)>,
+    pub archetype_mask: ComponentMask,
 }
 impl Archetype {
-    pub fn new(world: &World, layout: Vec<(ComponentSignature, u32)>) -> Self {
+    pub fn new(world: &World, layout: Vec<(ComponentMetadata, u32)>) -> Self {
         // Create a component storage array
         let mut component_storages = Vec::new();
+        let mut mask = ComponentMask {
+            words: [0; __Internals::COMPONENT_BITSET_WORDS as usize],
+        };
         for component_layout in layout.iter() {
             // Get type metadata for the given signature
             // This is very important, as this metadata is needed to create the storage
-            let type_metadata = world
-                .get_type_metadata_for_signature(component_layout.0)
-                .expect("Failed to get metadata for given signature");
-
             // Create a new component storage, then push it to the storage array
             let new_component_storage = ComponentStorage::new(
-                type_metadata.size as u32,
-                type_metadata.alignment as u32,
-                component_layout.0,
+                component_layout.0.size as u32,
+                component_layout.0.alignment as u32,
+                component_layout.0.mask.clone(),
             );
             component_storages.push(new_component_storage);
+
+            mask = mask.union(&component_layout.0.mask);
         }
 
         Self {
             entity_storages: Vec::new(),
             component_storages: component_storages,
             component_layout: layout,
+            archetype_mask: mask,
         }
     }
 
     pub fn add_entity(
         &mut self,
         entity: Entity,
-        components: Vec<(NonNull<u8>, ComponentSignature)>,
+        components: Vec<(NonNull<u8>, ComponentMask)>,
     ) -> EntityStorageId {
         assert!(
             components.len() == self.component_layout.len(),
@@ -53,13 +57,13 @@ impl Archetype {
         // Copy each index and begin iterator from the old components to the new storage
         for it in components.iter() {
             // Get begin iterator and signature
-            let (ptr, signature) = it;
+            let (ptr, mask) = it;
 
             // Get the component storage index
             let component_index = self
                 .component_layout
                 .iter()
-                .position(|(sig, _)| sig == signature)
+                .position(|(sig, _)| sig.mask == *mask)
                 .expect("Component signature not found in archetype layout");
 
             // Get the component storage based on the index

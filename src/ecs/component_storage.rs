@@ -1,16 +1,16 @@
 use std::ptr::NonNull;
 
-use crate::common::{__Internals, ComponentSignature};
+use crate::ecs::common::{__Internals, ComponentMask};
 
-pub(crate) struct ComponentStorage {
+pub struct ComponentStorage {
     storage: *mut u8,
     capacity: u32,
     size: u32,
     item_size: u32,
-    signature: ComponentSignature,
+    mask: ComponentMask,
 }
 impl ComponentStorage {
-    pub fn new(item_size: u32, item_alignemnt: u32, signature: ComponentSignature) -> Self {
+    pub fn new(item_size: u32, item_alignemnt: u32, mask: ComponentMask) -> Self {
         // Calculate initial capacity
         let initial_capacity = item_size * __Internals::INITIAL_COMPONENT_STORAGE_CAPACITY;
 
@@ -30,7 +30,7 @@ impl ComponentStorage {
             capacity: initial_capacity,
             size: 0,
             item_size,
-            signature,
+            mask,
         }
     }
 
@@ -70,8 +70,8 @@ impl ComponentStorage {
         }
         unsafe {
             // Get the last storage item
-            let last_ptr =
-                NonNull::new(self.storage.add(self.item_size as usize)).unwrap_unchecked();
+            let last_ptr = NonNull::new(self.storage.add((self.size - self.item_size) as usize))
+                .unwrap_unchecked();
             // Get the target item
             let current_ptr =
                 NonNull::new(self.storage.add(item_index as usize)).unwrap_unchecked();
@@ -133,7 +133,7 @@ impl ComponentStorage {
         // Returns how many items there currently are
         self.size / self.item_size
     }
-    pub fn signature(&self) -> ComponentSignature {
-        self.signature
+    pub fn mask(&self) -> &ComponentMask {
+        &self.mask
     }
 }
