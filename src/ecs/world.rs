@@ -1,4 +1,5 @@
-use std::any::TypeId;
+use std::any::{self, TypeId};
+use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use slotmap::{DenseSlotMap, Key};
@@ -7,10 +8,42 @@ use crate::ecs::archetype::{Archetype, ArchetypeId};
 use crate::ecs::common::{
     Component, ComponentMask, ComponentMetadata, Entity, EntityPointer, EntityStorageId,
 };
-use crate::ecs::component_storage::ComponentStorage;
-use crate::ecs::query::{self, ArchetypeQueryView, ComponentSet, Query};
+use crate::ecs::query::{ArchetypeQueryView, ComponentSet, Query};
+use crate::ecs::system::{
+    AbstractSystem, Flatten, SystemFunction, SystemRunner, SystemTuple, SystemVisitor,
+    SystemWrapper,
+};
 
-pub struct World {
+// World builder that allows chaining
+// Currently just support system adding, but I also plan to let it register components and some configurations
+pub struct ChainedWorldBuilder<T> {
+    systems: T,
+}
+impl<T: Flatten> ChainedWorldBuilder<T>
+where
+    T::Output: SystemTuple,
+{
+    pub fn add_system<F, C>(self, system: F) -> ChainedWorldBuilder<(T, SystemWrapper<F, C>)>
+    where
+        F: SystemFunction<F, C> + Fn(Query<C>),
+        C: ComponentSet,
+    {
+        let wrapped = SystemWrapper {
+            system,
+            _marker: PhantomData,
+        };
+
+        ChainedWorldBuilder {
+            systems: (self.systems, wrapped),
+        }
+    }
+
+    pub fn init(self) -> World<T::Output> {
+        World::init(self.systems.flatten())
+    }
+}
+
+pub struct World<S> {
     // 'entities' point to the real entities inside an archetype
     // (stored_key, index_to_entity_inside_archetype)
     entities: DenseSlotMap<Entity, EntityPointer>,
@@ -18,8 +51,15 @@ pub struct World {
     archetypes: Vec<Archetype>,
 
     empty_archetype_id: ArchetypeId,
+
+    systems: Option<S>,
 }
-impl World {
+impl World<()> {
+    pub const fn new() -> ChainedWorldBuilder<()> {
+        ChainedWorldBuilder { systems: () }
+    }
+}
+impl<S: SystemTuple> World<S> {
     fn create_archetype(&mut self, layout: Vec<(ComponentMetadata, u32)>) -> ArchetypeId {
         // This function expects a sorted layout
         assert!(
@@ -52,7 +92,7 @@ impl World {
 
     fn find_or_create_archetype_with_component<T>(
         &mut self,
-        current_archetype_id: usize,
+        current_archetype_id: u32,
     ) -> ArchetypeId
     where
         T: 'static + Component,
@@ -60,7 +100,7 @@ impl World {
         // Get a reference to the archetype the entity is currently in
         let current_archetype = self
             .archetypes
-            .get(current_archetype_id)
+            .get(current_archetype_id as usize)
             .expect("Failed to get archetype from current id");
 
         // Create a new component layout
@@ -84,6 +124,48 @@ impl World {
             .position(|archetype| archetype.component_layout == new_component_layout)
             .unwrap_or_else(|| self.create_archetype(new_component_layout) as usize)
             as ArchetypeId
+    }
+
+    fn find_or_create_archetype_without_component<T: Component>(
+        &mut self,
+        current_archetype_id: u32,
+    ) -> ArchetypeId {
+        // Get required metadatada from current archetype
+        let (new_archetype_mask, mut layout_template, storage_len) = {
+            let current_archetype = self
+                .archetypes
+                .get(current_archetype_id as usize)
+                .expect("Failed to get archetype from current id");
+
+            (
+                current_archetype.archetype_mask & !T::METADATA.mask,
+                current_archetype.component_layout.clone(),
+                current_archetype.component_storages.len() as u32,
+            )
+        };
+
+        // Remove the requested component
+        unsafe {
+            layout_template.remove(
+                layout_template
+                    .iter()
+                    .position(|c| c.0.mask == T::METADATA.mask)
+                    .unwrap_unchecked(),
+            )
+        };
+
+        // Try to find a pre existing archetype with the new mask
+        if let Some(index) = self
+            .archetypes
+            .iter()
+            .position(|archetype| archetype.archetype_mask == new_archetype_mask)
+        {
+            return index as ArchetypeId;
+        }
+
+        // Fallback
+        // Create an archetype with the new layout
+        self.create_archetype(layout_template) as ArchetypeId
     }
 
     fn delete_entity_from_archetype_using_pointer(&mut self, entity_ptr: EntityPointer) {
@@ -111,7 +193,7 @@ impl World {
         }
     }
 
-    pub fn new() -> Self {
+    fn init(systems: S) -> Self {
         let mut entities = DenseSlotMap::with_key();
 
         entities.reserve(1024);
@@ -123,6 +205,7 @@ impl World {
             entities,
             archetypes,
             empty_archetype_id: 0,
+            systems: Some(systems),
         };
 
         // Create an empty archetype to store entities without components
@@ -167,10 +250,7 @@ impl World {
         self.entities.remove(entity);
     }
 
-    pub fn add_component<T: 'static>(&mut self, entity: Entity, component: T)
-    where
-        T: 'static + Component,
-    {
+    pub fn add_component<T: Component>(&mut self, entity: Entity, component: T) {
         let entity_pointer = *self
             .entities
             .get(entity)
@@ -178,7 +258,7 @@ impl World {
 
         // Get or create an archetype that fits the entity
         let new_archetype_id =
-            self.find_or_create_archetype_with_component::<T>(entity_pointer.archetype as usize);
+            self.find_or_create_archetype_with_component::<T>(entity_pointer.archetype);
 
         // Get the position of the entity components within the now old archetype
         let old_components_position = self
@@ -238,10 +318,74 @@ impl World {
         self.delete_entity_from_archetype_using_pointer(entity_pointer);
     }
 
-    pub fn get_component<T: 'static>(&self, entity: Entity) -> &T
-    where
-        T: 'static + Component,
-    {
+    pub fn remove_component<T: Component>(&mut self, entity: Entity) -> () {
+        let entity_pointer = *self
+            .entities
+            .get(entity)
+            .expect("Failed to get entity for given id");
+
+        let new_archetype_id =
+            self.find_or_create_archetype_without_component::<T>(entity_pointer.archetype);
+
+        // Get the position of the entity components within the now old archetype
+        let old_components_position = self
+            .archetypes
+            .get(entity_pointer.archetype as usize)
+            .unwrap()
+            .entity_storages
+            .get(entity_pointer.index as usize)
+            .unwrap()
+            .1;
+
+        // Create an array with the begin iterator and signature of each component
+        // These will be later copied into the new archetype
+        let mut copy_list = Vec::new();
+        // Iterate over the component storages
+        for storage in self
+            .archetypes
+            .get(entity_pointer.archetype as usize)
+            .unwrap()
+            .component_storages
+            .iter()
+        {
+            if storage.mask() == &T::METADATA.mask {
+                continue;
+            }
+
+            // Get the begin iterator within the now old storage
+            let old_component_begin = NonNull::from_ref(
+                storage
+                    .get(old_components_position)
+                    .expect("Failed to get old component from archetype"),
+            );
+            // Push the begin iterator alongside the component signature to the copy list
+            copy_list.push((old_component_begin, *storage.mask()));
+        }
+
+        // Add the entity to its new archetype, consuming the copy list
+        self.archetypes
+            .get_mut(new_archetype_id as usize)
+            .unwrap()
+            .add_entity(entity, copy_list);
+
+        // Update the entity handles
+        unsafe {
+            // Point the Entity to the new archetype
+            self.entities.get_unchecked_mut(entity).archetype = new_archetype_id;
+            // Point the Entity to its updated index
+            self.entities.get_unchecked_mut(entity).index = self
+                .archetypes
+                .get_unchecked_mut(new_archetype_id as usize)
+                .entity_storages
+                .len() as u32
+                - 1;
+        }
+
+        // Delete from old archetype (copied pointer needed)
+        self.delete_entity_from_archetype_using_pointer(entity_pointer);
+    }
+
+    pub fn get_component<T: Component>(&self, entity: Entity) -> &T {
         let entity_pointer = self
             .entities
             .get(entity)
@@ -263,7 +407,6 @@ impl World {
 
         for component_storage in archetype.component_storages.iter() {
             // If the found storage isn't the needed storage, continue
-            assert_eq!(*component_storage.mask(), T::METADATA.mask);
             if *component_storage.mask() != T::METADATA.mask {
                 continue;
             }
@@ -278,11 +421,16 @@ impl World {
     }
 
     pub fn query<C: ComponentSet>(&mut self) -> Query<C> {
+        // Create archetype view array
         let mut archetype_views = Vec::new();
 
+        // Iterate through each existing archetype
         for archetype in self.archetypes.iter_mut() {
-            if (archetype.archetype_mask & C::MASK) == C::MASK {
+            // Check if the archetype contains the queried components
+            if archetype.archetype_mask.contains(&C::MASK) {
+                // Get a ref to the component storages from the archetype
                 let storages = &archetype.component_storages;
+                // Create an array, where each index points to the correct component storage, as it can be queried in any order
                 let matching_indices: Vec<usize> = C::COMPONENTS
                     .iter()
                     .map(|meta| {
@@ -293,6 +441,7 @@ impl World {
                     })
                     .collect();
 
+                // Get the position where the entity components are currently sitting in
                 let entity_positions: Vec<EntityStorageId> = archetype
                     .entity_storages
                     .iter()
@@ -305,6 +454,7 @@ impl World {
 
                 let storage_ptr = std::ptr::from_mut(&mut archetype.component_storages);
 
+                // Push to the archetype view array
                 archetype_views.push(ArchetypeQueryView {
                     storage_ptr,
                     matching_indices,
@@ -313,6 +463,27 @@ impl World {
             }
         }
 
+        // Create and return the query
         Query::new(archetype_views)
+    }
+
+    pub fn run_systems(&mut self) {
+        // 1. Take ownership of systems safely without requiring `S: Default`
+        if let Some(mut systems) = self.systems.take() {
+            let mut runner = SystemRunner;
+
+            // 2. Run systems passing `&mut World<S>`
+            systems.accept_visitor(&mut runner, self);
+
+            // 3. Put systems back
+            self.systems = Some(systems);
+        }
+    }
+
+    pub fn run_scheduler<V: SystemVisitor>(&mut self, scheduler: &mut V) {
+        if let Some(mut systems) = self.systems.take() {
+            systems.accept_visitor(scheduler, self);
+            self.systems = Some(systems);
+        }
     }
 }

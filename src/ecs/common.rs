@@ -1,5 +1,5 @@
 use slotmap::new_key_type;
-use std::ops::BitAnd;
+use std::ops::{BitAnd, Not};
 
 pub(crate) type EntityStorageId = u32;
 
@@ -76,20 +76,30 @@ impl BitAnd for ComponentMask {
 
     fn bitand(self, rhs: Self) -> Self::Output {
         let mut result = [0u64; __Internals::COMPONENT_BITSET_WORDS as usize];
-        for i in 0..4 {
+        for i in 0..__Internals::COMPONENT_BITSET_WORDS as usize {
             result[i] = self.words[i] & rhs.words[i];
         }
         ComponentMask { words: result }
     }
 }
-
 impl BitAnd for &ComponentMask {
     type Output = ComponentMask;
 
     fn bitand(self, rhs: Self) -> Self::Output {
         let mut result = [0u64; __Internals::COMPONENT_BITSET_WORDS as usize];
-        for i in 0..4 {
+        for i in 0..__Internals::COMPONENT_BITSET_WORDS as usize {
             result[i] = self.words[i] & rhs.words[i];
+        }
+        ComponentMask { words: result }
+    }
+}
+impl Not for ComponentMask {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        let mut result = [0u64; __Internals::COMPONENT_BITSET_WORDS as usize];
+        for i in 0..__Internals::COMPONENT_BITSET_WORDS as usize {
+            result[i] = !self.words[i];
         }
         ComponentMask { words: result }
     }

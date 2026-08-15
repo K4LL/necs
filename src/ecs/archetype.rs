@@ -16,7 +16,7 @@ pub(crate) struct Archetype {
     pub archetype_mask: ComponentMask,
 }
 impl Archetype {
-    pub fn new(world: &World, layout: Vec<(ComponentMetadata, u32)>) -> Self {
+    pub fn new<T>(world: &World<T>, layout: Vec<(ComponentMetadata, u32)>) -> Self {
         // Create a component storage array
         let mut component_storages = Vec::new();
         let mut mask = ComponentMask {
