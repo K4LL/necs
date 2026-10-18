@@ -1,9 +1,12 @@
 use slotmap::new_key_type;
-use std::ops::{BitAnd, Not};
+use std::{ops::{BitAnd, Not}};
 
 pub(crate) type EntityStorageId = u32;
 
 new_key_type! { pub struct Entity; }
+
+pub trait Empty {}
+impl Empty for () {}
 
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub(crate) struct EntityPointer {

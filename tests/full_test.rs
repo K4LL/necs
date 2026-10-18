@@ -1,9 +1,6 @@
-use std::marker::PhantomData;
-
-use ::necs::ecs::{Entity, World};
+use ::necs::ecs::{World};
 use necs::{
-    ecs::query::{ComponentSet, Query},
-    register_components,
+    ecs::{query::{Query, Read, Write}}, register_components,
 };
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -27,14 +24,14 @@ struct PositionButF32 {
 
 register_components!(Health, Position, PositionButF32);
 
-fn handle_movement(mut query: Query<(Position,)>) {
+fn handle_movement(_: Query<(), Read>, mut query: Query<(Position,), Write>) {
     println!("handle_movement running...");
     for it in query.iter() {
         println!("Position: {:#?}", it)
     }
 }
 
-fn handle_health(mut query: Query<(Position, Health)>) {
+fn handle_health(_: Query<(), Read>, mut query: Query<(Position, Health), Write>) {
     println!("handle_health running...");
     for (it, sit) in query.iter() {
         println!("Position: {:#?}, Health: {:#?}", it, sit);

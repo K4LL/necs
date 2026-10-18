@@ -1,37 +1,58 @@
 use std::marker::PhantomData;
 
 use crate::ecs::World;
-use crate::ecs::query::{ComponentSet, Query};
+use crate::ecs::common::{Component, ComponentMask, ComponentMetadata };
+use crate::ecs::query::{ComponentSet, Query, Read, Write};
+
+pub struct Null;
+impl Component for Null {
+    const METADATA: ComponentMetadata = ComponentMetadata {
+        uid: usize::MAX,
+        mask: ComponentMask { words: [0; 4] },
+        size: 0,
+        alignment: 0,
+    };
+}
 
 // Trait for systems
-pub trait SystemFunction<F, C>
+pub trait SystemFunction<F, R, W>
 where
-    F: Fn(Query<C>),
-    C: ComponentSet,
+    F: Fn(Query<R, Read>, Query<W, Write>),
+    R: ComponentSet,
+    W: ComponentSet,
 {
-    type Components: ComponentSet;
+    type ReadComponents: ComponentSet;
+    type WriteComponents: ComponentSet;
 
     fn run<T: SystemTuple>(&self, world: &mut World<T>);
 }
-impl<F, C> SystemFunction<F, C> for F
+impl<F, R, W> SystemFunction<F, R, W> for F
 where
-    F: Fn(Query<C>),
-    C: ComponentSet,
+    F: Fn(Query<R, Read>, Query<W, Write>),
+    R: ComponentSet,
+    W: ComponentSet,
 {
-    type Components = C;
+    type ReadComponents = R;
+    type WriteComponents = W;
 
     fn run<T: SystemTuple>(&self, world: &mut World<T>) {
-        let query = world.query::<C>();
-        (self)(query);
+        let read = world.query::<R>();
+        let write = world.query_mut::<W>();
+        (self)(read, write);
     }
 }
 
 // Trait for systems but with no query or restraints
 // Note: W is required by the world, but has nothing to do with this trait
 pub trait AbstractSystem {
+    type ReadComponents: ComponentSet;
+    type WriteComponents: ComponentSet;
     fn run_system<W: SystemTuple>(&self, world: &mut World<W>);
 }
 impl AbstractSystem for () {
+    type ReadComponents = (Null,);
+    type WriteComponents = (Null,);
+
     #[inline]
     fn run_system<W>(&self, _world: &mut World<W>) {
         // Empty base case
@@ -39,17 +60,22 @@ impl AbstractSystem for () {
 }
 
 // Struct that allows FunctionSystems to be turned into AbstractSystems
-pub struct SystemWrapper<F, C> {
+pub struct SystemWrapper<F, R, W> {
     pub system: F,
-    pub _marker: PhantomData<C>,
+    pub _read_marker: PhantomData<R>,
+    pub _write_marker: PhantomData<W>,
 }
-impl<F, C> AbstractSystem for SystemWrapper<F, C>
+impl<F, R, W> AbstractSystem for SystemWrapper<F, R, W>
 where
-    F: SystemFunction<F, C> + Fn(Query<C>),
-    C: ComponentSet,
+    F: SystemFunction<F, R, W> + Fn(Query<R, Read>, Query<W, Write>),
+    R: ComponentSet,
+    W: ComponentSet,
 {
+    type ReadComponents = R;
+    type WriteComponents = W;
+
     #[inline]
-    fn run_system<W: SystemTuple>(&self, world: &mut World<W>) {
+    fn run_system<Wrld: SystemTuple>(&self, world: &mut World<Wrld>) {
         self.system.run(world);
     }
 }

@@ -3,7 +3,6 @@ use std::ptr::NonNull;
 use crate::ecs::common::__Internals;
 use crate::ecs::common::{ComponentMask, ComponentMetadata, Entity, EntityStorageId};
 use crate::ecs::component_storage::ComponentStorage;
-use crate::ecs::world::World;
 
 pub(crate) type ArchetypeId = u32;
 
@@ -16,7 +15,7 @@ pub(crate) struct Archetype {
     pub archetype_mask: ComponentMask,
 }
 impl Archetype {
-    pub fn new<T>(world: &World<T>, layout: Vec<(ComponentMetadata, u32)>) -> Self {
+    pub fn new(layout: Vec<(ComponentMetadata, u32)>) -> Self {
         // Create a component storage array
         let mut component_storages = Vec::new();
         let mut mask = ComponentMask {

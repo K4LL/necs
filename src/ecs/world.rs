@@ -1,4 +1,3 @@
-use std::any::{self, TypeId};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
@@ -6,11 +5,10 @@ use slotmap::{DenseSlotMap, Key};
 
 use crate::ecs::archetype::{Archetype, ArchetypeId};
 use crate::ecs::common::{
-    Component, ComponentMask, ComponentMetadata, Entity, EntityPointer, EntityStorageId,
+    Component, ComponentMetadata, Entity, EntityPointer, EntityStorageId
 };
-use crate::ecs::query::{ArchetypeQueryView, ComponentSet, Query};
-use crate::ecs::system::{
-    AbstractSystem, Flatten, SystemFunction, SystemRunner, SystemTuple, SystemVisitor,
+use crate::ecs::query::{ ComponentSet, Query, QueryArchetypeView, Read, Write};
+use crate::ecs::system::{ Flatten, SystemFunction, SystemRunner, SystemTuple, SystemVisitor,
     SystemWrapper,
 };
 
@@ -23,14 +21,16 @@ impl<T: Flatten> ChainedWorldBuilder<T>
 where
     T::Output: SystemTuple,
 {
-    pub fn add_system<F, C>(self, system: F) -> ChainedWorldBuilder<(T, SystemWrapper<F, C>)>
+    pub fn add_system<F, R, W>(self, system: F) -> ChainedWorldBuilder<(T, SystemWrapper<F, R, W>)>
     where
-        F: SystemFunction<F, C> + Fn(Query<C>),
-        C: ComponentSet,
+        F: SystemFunction<F, R, W> + Fn(Query<R, Read>, Query<W, Write>),
+        R: ComponentSet,
+        W: ComponentSet,
     {
         let wrapped = SystemWrapper {
             system,
-            _marker: PhantomData,
+            _read_marker: PhantomData,
+            _write_marker: PhantomData,
         };
 
         ChainedWorldBuilder {
@@ -68,12 +68,13 @@ impl<S: SystemTuple> World<S> {
         );
 
         // Create a new archetype and push it to the archetype array
-        let new_archetype = Archetype::new(self, layout);
+        let new_archetype = Archetype::new(layout);
         self.archetypes.push(new_archetype);
 
         // Return its index
         self.archetypes.len() as ArchetypeId - 1
     }
+    #[allow(unused)]
     fn create_archetype_and_sort(
         &mut self,
         mut layout: Vec<(ComponentMetadata, u32)>,
@@ -83,7 +84,7 @@ impl<S: SystemTuple> World<S> {
         layout.sort_unstable();
 
         // Create a new archetype and push it to the archetype array
-        let new_archetype = Archetype::new(self, layout);
+        let new_archetype = Archetype::new(layout);
         self.archetypes.push(new_archetype);
 
         // Return its index
@@ -131,7 +132,7 @@ impl<S: SystemTuple> World<S> {
         current_archetype_id: u32,
     ) -> ArchetypeId {
         // Get required metadatada from current archetype
-        let (new_archetype_mask, mut layout_template, storage_len) = {
+        let (new_archetype_mask, mut layout_template, _) = {
             let current_archetype = self
                 .archetypes
                 .get(current_archetype_id as usize)
@@ -209,7 +210,7 @@ impl<S: SystemTuple> World<S> {
         };
 
         // Create an empty archetype to store entities without components
-        world.archetypes.push(Archetype::new(&world, Vec::new()));
+        world.archetypes.push(Archetype::new(Vec::new()));
 
         world
     }
@@ -420,18 +421,65 @@ impl<S: SystemTuple> World<S> {
         panic!("No component with the given type was found")
     }
 
-    pub fn query<C: ComponentSet>(&mut self) -> Query<C> {
+    pub fn query<R: ComponentSet>(&self) -> Query<R, Read> {
+        // Create archetype view array
+        let mut archetype_views = Vec::new();
+
+        // Iterate through each existing archetype
+        for archetype in self.archetypes.iter() {
+            // Check if the archetype contains the queried components
+            if archetype.archetype_mask.contains(&R::MASK) {
+                // Get a ref to the component storages from the archetype
+                let storages = &archetype.component_storages;
+                // Create an array, where each index points to the correct component storage, as it can be queried in any order
+                let matching_indices: Vec<usize> = R::COMPONENTS
+                    .iter()
+                    .map(|meta| {
+                        storages
+                            .iter()
+                            .position(|ptr| *ptr.mask() == meta.mask)
+                            .expect("Archetype missing a component required by Query")
+                    })
+                    .collect();
+
+                // Get the position where the entity components are currently sitting in
+                let entity_positions: Vec<EntityStorageId> = archetype
+                    .entity_storages
+                    .iter()
+                    .map(|(_, row_idx)| *row_idx)
+                    .collect();
+
+                if entity_positions.is_empty() {
+                    continue;
+                }
+
+                let storage_ptr = std::ptr::from_ref(&archetype.component_storages);
+
+                // Push to the archetype view array
+                archetype_views.push(QueryArchetypeView::<Read> {
+                    storage_ptr,
+                    matching_indices,
+                    entity_positions,
+                });
+            }
+        }
+
+        // Create and return the query
+        Query::new(archetype_views)
+    }
+
+    pub fn query_mut<W: ComponentSet>(&mut self) -> Query<W, Write> {
         // Create archetype view array
         let mut archetype_views = Vec::new();
 
         // Iterate through each existing archetype
         for archetype in self.archetypes.iter_mut() {
             // Check if the archetype contains the queried components
-            if archetype.archetype_mask.contains(&C::MASK) {
+            if archetype.archetype_mask.contains(&W::MASK) {
                 // Get a ref to the component storages from the archetype
                 let storages = &archetype.component_storages;
                 // Create an array, where each index points to the correct component storage, as it can be queried in any order
-                let matching_indices: Vec<usize> = C::COMPONENTS
+                let matching_indices: Vec<usize> = W::COMPONENTS
                     .iter()
                     .map(|meta| {
                         storages
@@ -455,7 +503,7 @@ impl<S: SystemTuple> World<S> {
                 let storage_ptr = std::ptr::from_mut(&mut archetype.component_storages);
 
                 // Push to the archetype view array
-                archetype_views.push(ArchetypeQueryView {
+                archetype_views.push(QueryArchetypeView::<Write> {
                     storage_ptr,
                     matching_indices,
                     entity_positions,
@@ -468,14 +516,14 @@ impl<S: SystemTuple> World<S> {
     }
 
     pub fn run_systems(&mut self) {
-        // 1. Take ownership of systems safely without requiring `S: Default`
+        // Take ownership of systems
         if let Some(mut systems) = self.systems.take() {
             let mut runner = SystemRunner;
 
-            // 2. Run systems passing `&mut World<S>`
+            // Run systems passing
             systems.accept_visitor(&mut runner, self);
 
-            // 3. Put systems back
+            // Put systems back
             self.systems = Some(systems);
         }
     }
