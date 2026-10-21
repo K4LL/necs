@@ -4,12 +4,10 @@ use std::ptr::NonNull;
 use slotmap::{DenseSlotMap, Key};
 
 use crate::ecs::archetype::{Archetype, ArchetypeId};
-use crate::ecs::common::{
-    Component, ComponentMetadata, Entity, EntityPointer, EntityStorageId
-};
-use crate::ecs::query::{ ComponentSet, Query, QueryArchetypeView, Read, Write};
-use crate::ecs::system::{ Flatten, SystemFunction, SystemRunner, SystemTuple, SystemVisitor,
-    SystemWrapper,
+use crate::ecs::common::{Component, ComponentMetadata, Entity, EntityPointer, EntityStorageId};
+use crate::ecs::query::{ComponentSet, Query, QueryArchetypeView, Read, Write};
+use crate::ecs::system::{
+    Flatten, SystemFunction, SystemRunner, SystemTuple, SystemVisitor, SystemWrapper,
 };
 
 // World builder that allows chaining

@@ -1,5 +1,5 @@
 use slotmap::new_key_type;
-use std::{ops::{BitAnd, Not}};
+use std::ops::{BitAnd, Not};
 
 pub(crate) type EntityStorageId = u32;
 

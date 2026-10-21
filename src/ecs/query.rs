@@ -1,7 +1,8 @@
 use std::marker::PhantomData;
 
 use crate::ecs::{
-    common::{Component, ComponentMask, ComponentMetadata, EntityStorageId}, component_storage::ComponentStorage,
+    common::{Component, ComponentMask, ComponentMetadata, EntityStorageId},
+    component_storage::ComponentStorage,
 };
 
 pub trait ComponentSet {
@@ -12,7 +13,7 @@ pub trait ComponentSet {
 
     type Fetch<'a>;
 
-     unsafe fn fetch_from_pointers<'a>(
+    unsafe fn fetch_from_pointers<'a>(
         ptrs_storage: *const Vec<ComponentStorage>,
         indices: &[usize],
         components_position: EntityStorageId,
@@ -250,9 +251,9 @@ pub struct QueryIter<'a, Q: ComponentSet, S: QueryStorageState> {
     _marker: PhantomData<Q>,
 }
 
-impl<'a, Q, S> Iterator for QueryIter<'a, Q, S> 
-where 
-    Q: ComponentSet, 
+impl<'a, Q, S> Iterator for QueryIter<'a, Q, S>
+where
+    Q: ComponentSet,
     S: QueryStorageState,
 {
     type Item = Q::Fetch<'a>;

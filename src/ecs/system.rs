@@ -1,8 +1,8 @@
 use std::marker::PhantomData;
 
-use crate::ecs::World;
-use crate::ecs::common::{Component, ComponentMask, ComponentMetadata };
+use crate::ecs::common::{Component, ComponentMask, ComponentMetadata};
 use crate::ecs::query::{ComponentSet, Query, Read, Write};
+use crate::ecs::World;
 
 pub struct Null;
 impl Component for Null {

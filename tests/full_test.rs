@@ -1,6 +1,7 @@
-use ::necs::ecs::{World};
+use ::necs::ecs::World;
 use necs::{
-    ecs::{query::{Query, Read, Write}}, register_components,
+    ecs::query::{Query, Read, Write},
+    register_components,
 };
 
 #[derive(Debug, PartialEq, Copy, Clone)]
