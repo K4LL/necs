@@ -46,7 +46,7 @@ pub struct World<S> {
     // (stored_key, index_to_entity_inside_archetype)
     entities: DenseSlotMap<Entity, EntityPointer>,
 
-    archetypes: Vec<Archetype>,
+    pub archetypes: Vec<Archetype>,
 
     empty_archetype_id: ArchetypeId,
 
