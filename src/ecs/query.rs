@@ -8,10 +8,10 @@ use crate::ecs::{
 pub trait ComponentSet {
     const LEN: usize;
     const MASK: ComponentMask;
-
     const COMPONENTS: &'static [&'static ComponentMetadata];
 
     type Fetch<'a>;
+    type FetchMut<'a>;
 
     unsafe fn fetch_from_pointers<'a>(
         ptrs_storage: *const Vec<ComponentStorage>,
@@ -22,7 +22,7 @@ pub trait ComponentSet {
         ptrs_storage: *mut Vec<ComponentStorage>,
         indices: &[usize],
         components_position: EntityStorageId,
-    ) -> Self::Fetch<'a>;
+    ) -> Self::FetchMut<'a>;
 }
 impl ComponentSet for () {
     const LEN: usize = 0;
@@ -30,6 +30,7 @@ impl ComponentSet for () {
     const COMPONENTS: &'static [&'static ComponentMetadata] = &[];
 
     type Fetch<'a> = ();
+    type FetchMut<'a> = ();
 
     unsafe fn fetch_from_pointers<'a>(
         _ptrs_storage: *const Vec<ComponentStorage>,
@@ -42,7 +43,7 @@ impl ComponentSet for () {
         _ptrs_storage: *mut Vec<ComponentStorage>,
         _indices: &[usize],
         _components_position: EntityStorageId,
-    ) -> Self::Fetch<'a> {
+    ) -> Self::FetchMut<'a> {
         ()
     }
 }
@@ -58,34 +59,30 @@ macro_rules! impl_component_set_tuples {
         impl<$first: Component> ComponentSet for ($first,) {
             const LEN: usize = 1;
             const MASK: ComponentMask = $first::METADATA.mask;
-
-            // Compile-time slice for single-element tuple
-            const COMPONENTS: &'static [&'static ComponentMetadata] = &[
-                &$first::METADATA
-            ];
+            const COMPONENTS: &'static [&'static ComponentMetadata] = &[&$first::METADATA];
 
             type Fetch<'a> = &'a $first;
+            type FetchMut<'a> = &'a mut $first;
 
-            #[allow(unused_variables)]
             unsafe fn fetch_from_pointers<'a>(
                 ptrs_storage: *const Vec<ComponentStorage>,
                 indices: &[usize],
-                components_position: EntityStorageId
+                components_position: EntityStorageId,
             ) -> Self::Fetch<'a> {
                 unsafe {
                     let storage = &*ptrs_storage;
-                    (storage[0]).get_unchecked::<$first>(components_position)
+                    storage[indices[0]].get_unchecked::<$first>(components_position)
                 }
             }
-            #[allow(unused_variables)]
+
             unsafe fn fetch_from_pointers_mut<'a>(
                 ptrs_storage: *mut Vec<ComponentStorage>,
                 indices: &[usize],
-                components_position: EntityStorageId
-            ) -> Self::Fetch<'a> {
+                components_position: EntityStorageId,
+            ) -> Self::FetchMut<'a> {
                 unsafe {
-                    let storage = &*ptrs_storage;
-                    (storage[0]).get_unchecked::<$first>(components_position)
+                    let base = (*ptrs_storage).as_mut_ptr();
+                    (&mut *base.add(indices[0])).get_mut_unchecked::<$first>(components_position)
                 }
             }
         }
@@ -95,14 +92,11 @@ macro_rules! impl_component_set_tuples {
         impl<$first: Component, $( $rest: Component ),+> ComponentSet for ($first, $( $rest, )+) {
             const LEN: usize = 1 $( + replace_expr!($rest 1) )+;
             const MASK: ComponentMask = $first::METADATA.mask $( .union(&$rest::METADATA.mask) )+;
-
-            // Compile-time slice for multi-element tuples
-            const COMPONENTS: &'static [&'static ComponentMetadata] = &[
-                &$first::METADATA,
-                $( &$rest::METADATA ),+
-            ];
+            const COMPONENTS: &'static [&'static ComponentMetadata] =
+                &[&$first::METADATA, $( &$rest::METADATA ),+];
 
             type Fetch<'a> = (&'a $first, $(&'a $rest,)+);
+            type FetchMut<'a> = (&'a mut $first, $(&'a mut $rest,)+);
 
             unsafe fn fetch_from_pointers<'a>(
                 ptrs_storage: *const Vec<ComponentStorage>,
@@ -112,16 +106,15 @@ macro_rules! impl_component_set_tuples {
                 unsafe {
                     let storage = &*ptrs_storage;
                     let mut iter = indices.iter();
-
                     (
                         {
-                            let storage_idx = *iter.next().unwrap();
-                            (storage[storage_idx]).get_unchecked::<$first>(components_position)
-                        }, // <--- Comma separating the first element from the rest
+                            let i = *iter.next().unwrap();
+                            storage[i].get_unchecked::<$first>(components_position)
+                        },
                         $(
                             {
-                                let storage_idx = *iter.next().unwrap();
-                                (storage[storage_idx]).get_unchecked::<$rest>(components_position)
+                                let i = *iter.next().unwrap();
+                                storage[i].get_unchecked::<$rest>(components_position)
                             }
                         ),+
                     )
@@ -132,20 +125,19 @@ macro_rules! impl_component_set_tuples {
                 ptrs_storage: *mut Vec<ComponentStorage>,
                 indices: &[usize],
                 components_position: EntityStorageId,
-            ) -> Self::Fetch<'a> {
+            ) -> Self::FetchMut<'a> {
                 unsafe {
-                    let storage = &*ptrs_storage;
+                    let base = (*ptrs_storage).as_mut_ptr();
                     let mut iter = indices.iter();
-
                     (
                         {
-                            let storage_idx = *iter.next().unwrap();
-                            (storage[storage_idx]).get_unchecked::<$first>(components_position)
+                            let i = *iter.next().unwrap();
+                            (&mut *base.add(i)).get_mut_unchecked::<$first>(components_position)
                         },
                         $(
                             {
-                                let storage_idx = *iter.next().unwrap();
-                                (storage[storage_idx]).get_unchecked::<$rest>(components_position)
+                                let i = *iter.next().unwrap();
+                                (&mut *base.add(i)).get_mut_unchecked::<$rest>(components_position)
                             }
                         ),+
                     )
@@ -182,44 +174,49 @@ impl ReadAccessMode for Read {}
 
 pub trait QueryStorageState {
     type Storage: Copy;
+    type Item<'a, Q: ComponentSet>;
 
     unsafe fn fetch<'a, Q: ComponentSet>(
         storage_ptr: Self::Storage,
         indices: &[usize],
         components_position: EntityStorageId,
-    ) -> Q::Fetch<'a>;
+    ) -> Self::Item<'a, Q>;
 }
 
 impl QueryStorageState for Read {
     type Storage = *const Vec<ComponentStorage>;
+    type Item<'a, Q: ComponentSet> = Q::Fetch<'a>;
 
     unsafe fn fetch<'a, Q: ComponentSet>(
         storage_ptr: Self::Storage,
         indices: &[usize],
         components_position: EntityStorageId,
-    ) -> Q::Fetch<'a> {
-        Q::fetch_from_pointers(storage_ptr, indices, components_position)
+    ) -> Self::Item<'a, Q> {
+        unsafe { Q::fetch_from_pointers(storage_ptr, indices, components_position) }
     }
 }
 
 impl QueryStorageState for Write {
     type Storage = *mut Vec<ComponentStorage>;
+    type Item<'a, Q: ComponentSet> = Q::FetchMut<'a>;
 
     unsafe fn fetch<'a, Q: ComponentSet>(
         storage_ptr: Self::Storage,
         indices: &[usize],
         components_position: EntityStorageId,
-    ) -> Q::Fetch<'a> {
-        Q::fetch_from_pointers_mut(storage_ptr, indices, components_position)
+    ) -> Self::Item<'a, Q> {
+        unsafe { Q::fetch_from_pointers_mut(storage_ptr, indices, components_position) }
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct QueryArchetypeView<S: QueryStorageState> {
     pub storage_ptr: S::Storage,
     pub matching_indices: Vec<usize>,
     pub entity_positions: Vec<EntityStorageId>,
 }
 
+#[derive(Clone)]
 pub struct Query<Q: ComponentSet, S: QueryStorageState> {
     /// Views into every archetype that contains our required component subset
     pub(crate) archetype_views: Vec<QueryArchetypeView<S>>,
@@ -256,7 +253,7 @@ where
     Q: ComponentSet,
     S: QueryStorageState,
 {
-    type Item = Q::Fetch<'a>;
+    type Item = S::Item<'a, Q>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.archetype_index < self.views.len() {

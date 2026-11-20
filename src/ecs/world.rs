@@ -46,7 +46,7 @@ pub struct World<S> {
     // (stored_key, index_to_entity_inside_archetype)
     entities: DenseSlotMap<Entity, EntityPointer>,
 
-    pub archetypes: Vec<Archetype>,
+    pub(crate) archetypes: Vec<Archetype>,
 
     empty_archetype_id: ArchetypeId,
 
@@ -467,6 +467,102 @@ impl<S: SystemTuple> World<S> {
     }
 
     pub fn query_mut<W: ComponentSet>(&mut self) -> Query<W, Write> {
+        // Create archetype view array
+        let mut archetype_views = Vec::new();
+
+        // Iterate through each existing archetype
+        for archetype in self.archetypes.iter_mut() {
+            // Check if the archetype contains the queried components
+            if archetype.archetype_mask.contains(&W::MASK) {
+                // Get a ref to the component storages from the archetype
+                let storages = &archetype.component_storages;
+                // Create an array, where each index points to the correct component storage, as it can be queried in any order
+                let matching_indices: Vec<usize> = W::COMPONENTS
+                    .iter()
+                    .map(|meta| {
+                        storages
+                            .iter()
+                            .position(|ptr| *ptr.mask() == meta.mask)
+                            .expect("Archetype missing a component required by Query")
+                    })
+                    .collect();
+
+                // Get the position where the entity components are currently sitting in
+                let entity_positions: Vec<EntityStorageId> = archetype
+                    .entity_storages
+                    .iter()
+                    .map(|(_, row_idx)| *row_idx)
+                    .collect();
+
+                if entity_positions.is_empty() {
+                    continue;
+                }
+
+                let storage_ptr = std::ptr::from_mut(&mut archetype.component_storages);
+
+                // Push to the archetype view array
+                archetype_views.push(QueryArchetypeView::<Write> {
+                    storage_ptr,
+                    matching_indices,
+                    entity_positions,
+                });
+            }
+        }
+
+        // Create and return the query
+        Query::new(archetype_views)
+    }
+
+    /// Actually no function have some type of sync so...
+    pub(crate) unsafe fn query_no_sync<R: ComponentSet>(&self) -> Query<R, Read> {
+        // Create archetype view array
+        let mut archetype_views = Vec::new();
+
+        // Iterate through each existing archetype
+        for archetype in self.archetypes.iter() {
+            // Check if the archetype contains the queried components
+            if archetype.archetype_mask.contains(&R::MASK) {
+                // Get a ref to the component storages from the archetype
+                let storages = &archetype.component_storages;
+                // Create an array, where each index points to the correct component storage, as it can be queried in any order
+                let matching_indices: Vec<usize> = R::COMPONENTS
+                    .iter()
+                    .map(|meta| {
+                        storages
+                            .iter()
+                            .position(|ptr| *ptr.mask() == meta.mask)
+                            .expect("Archetype missing a component required by Query")
+                    })
+                    .collect();
+
+                // Get the position where the entity components are currently sitting in
+                let entity_positions: Vec<EntityStorageId> = archetype
+                    .entity_storages
+                    .iter()
+                    .map(|(_, row_idx)| *row_idx)
+                    .collect();
+
+                if entity_positions.is_empty() {
+                    continue;
+                }
+
+                let storage_ptr = std::ptr::from_ref(&archetype.component_storages);
+
+                // Push to the archetype view array
+                archetype_views.push(QueryArchetypeView::<Read> {
+                    storage_ptr,
+                    matching_indices,
+                    entity_positions,
+                });
+            }
+        }
+
+        // Create and return the query
+        Query::new(archetype_views)
+    }
+
+    /// Actually no function have some type of sync so...
+    pub(crate) unsafe fn query_mut_no_sync<W: ComponentSet>(&mut self) -> Query<W, Write> {
         // Create archetype view array
         let mut archetype_views = Vec::new();
 
