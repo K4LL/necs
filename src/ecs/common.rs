@@ -5,6 +5,9 @@ pub(crate) type EntityStorageId = u32;
 
 new_key_type! { pub struct Entity; }
 
+pub trait Empty {}
+impl Empty for () {}
+
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub(crate) struct EntityPointer {
     pub archetype: u32,

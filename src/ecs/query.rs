@@ -1,24 +1,51 @@
 use std::marker::PhantomData;
 
 use crate::ecs::{
-    Entity, World,
-    common::{Component, ComponentMask, ComponentMetadata, EntityPointer, EntityStorageId},
+    common::{Component, ComponentMask, ComponentMetadata, EntityStorageId},
     component_storage::ComponentStorage,
 };
 
 pub trait ComponentSet {
     const LEN: usize;
     const MASK: ComponentMask;
-
     const COMPONENTS: &'static [&'static ComponentMetadata];
 
     type Fetch<'a>;
+    type FetchMut<'a>;
 
     unsafe fn fetch_from_pointers<'a>(
-        ptrs_storage: *mut Vec<ComponentStorage>,
+        ptrs_storage: *const Vec<ComponentStorage>,
         indices: &[usize],
         components_position: EntityStorageId,
     ) -> Self::Fetch<'a>;
+    unsafe fn fetch_from_pointers_mut<'a>(
+        ptrs_storage: *mut Vec<ComponentStorage>,
+        indices: &[usize],
+        components_position: EntityStorageId,
+    ) -> Self::FetchMut<'a>;
+}
+impl ComponentSet for () {
+    const LEN: usize = 0;
+    const MASK: ComponentMask = ComponentMask { words: [0; 4] };
+    const COMPONENTS: &'static [&'static ComponentMetadata] = &[];
+
+    type Fetch<'a> = ();
+    type FetchMut<'a> = ();
+
+    unsafe fn fetch_from_pointers<'a>(
+        _ptrs_storage: *const Vec<ComponentStorage>,
+        _indices: &[usize],
+        _components_position: EntityStorageId,
+    ) -> Self::Fetch<'a> {
+        ()
+    }
+    unsafe fn fetch_from_pointers_mut<'a>(
+        _ptrs_storage: *mut Vec<ComponentStorage>,
+        _indices: &[usize],
+        _components_position: EntityStorageId,
+    ) -> Self::FetchMut<'a> {
+        ()
+    }
 }
 
 macro_rules! replace_expr {
@@ -32,22 +59,30 @@ macro_rules! impl_component_set_tuples {
         impl<$first: Component> ComponentSet for ($first,) {
             const LEN: usize = 1;
             const MASK: ComponentMask = $first::METADATA.mask;
-
-            // Compile-time slice for single-element tuple
-            const COMPONENTS: &'static [&'static ComponentMetadata] = &[
-                &$first::METADATA
-            ];
+            const COMPONENTS: &'static [&'static ComponentMetadata] = &[&$first::METADATA];
 
             type Fetch<'a> = &'a $first;
+            type FetchMut<'a> = &'a mut $first;
 
             unsafe fn fetch_from_pointers<'a>(
-                ptrs_storage: *mut Vec<ComponentStorage>,
+                ptrs_storage: *const Vec<ComponentStorage>,
                 indices: &[usize],
-                components_position: EntityStorageId
+                components_position: EntityStorageId,
             ) -> Self::Fetch<'a> {
                 unsafe {
                     let storage = &*ptrs_storage;
-                    (storage[0]).get_unchecked::<$first>(components_position)
+                    storage[indices[0]].get_unchecked::<$first>(components_position)
+                }
+            }
+
+            unsafe fn fetch_from_pointers_mut<'a>(
+                ptrs_storage: *mut Vec<ComponentStorage>,
+                indices: &[usize],
+                components_position: EntityStorageId,
+            ) -> Self::FetchMut<'a> {
+                unsafe {
+                    let base = (*ptrs_storage).as_mut_ptr();
+                    (&mut *base.add(indices[0])).get_mut_unchecked::<$first>(components_position)
                 }
             }
         }
@@ -57,35 +92,52 @@ macro_rules! impl_component_set_tuples {
         impl<$first: Component, $( $rest: Component ),+> ComponentSet for ($first, $( $rest, )+) {
             const LEN: usize = 1 $( + replace_expr!($rest 1) )+;
             const MASK: ComponentMask = $first::METADATA.mask $( .union(&$rest::METADATA.mask) )+;
-
-            // Compile-time slice for multi-element tuples
-            const COMPONENTS: &'static [&'static ComponentMetadata] = &[
-                &$first::METADATA,
-                $( &$rest::METADATA ),+
-            ];
+            const COMPONENTS: &'static [&'static ComponentMetadata] =
+                &[&$first::METADATA, $( &$rest::METADATA ),+];
 
             type Fetch<'a> = (&'a $first, $(&'a $rest,)+);
+            type FetchMut<'a> = (&'a mut $first, $(&'a mut $rest,)+);
 
             unsafe fn fetch_from_pointers<'a>(
-                ptrs_storage: *mut Vec<ComponentStorage>,
+                ptrs_storage: *const Vec<ComponentStorage>,
                 indices: &[usize],
                 components_position: EntityStorageId,
             ) -> Self::Fetch<'a> {
                 unsafe {
                     let storage = &*ptrs_storage;
-                    let mut idx = 0;
-
+                    let mut iter = indices.iter();
                     (
                         {
-                            let storage_idx = indices[idx];
-                            idx += 1;
-                            (storage[storage_idx]).get_unchecked::<$first>(components_position)
+                            let i = *iter.next().unwrap();
+                            storage[i].get_unchecked::<$first>(components_position)
                         },
                         $(
                             {
-                                let storage_idx = indices[idx];
-                                idx += 1;
-                                (storage[storage_idx]).get_unchecked::<$rest>(components_position)
+                                let i = *iter.next().unwrap();
+                                storage[i].get_unchecked::<$rest>(components_position)
+                            }
+                        ),+
+                    )
+                }
+            }
+
+            unsafe fn fetch_from_pointers_mut<'a>(
+                ptrs_storage: *mut Vec<ComponentStorage>,
+                indices: &[usize],
+                components_position: EntityStorageId,
+            ) -> Self::FetchMut<'a> {
+                unsafe {
+                    let base = (*ptrs_storage).as_mut_ptr();
+                    let mut iter = indices.iter();
+                    (
+                        {
+                            let i = *iter.next().unwrap();
+                            (&mut *base.add(i)).get_mut_unchecked::<$first>(components_position)
+                        },
+                        $(
+                            {
+                                let i = *iter.next().unwrap();
+                                (&mut *base.add(i)).get_mut_unchecked::<$rest>(components_position)
                             }
                         ),+
                     )
@@ -107,30 +159,79 @@ macro_rules! impl_component_set_all_tuples {
 
 impl_component_set_all_tuples!(A, B, C, D, E, F, G, H, I, J);
 
-pub struct ArchetypeQueryView {
-    /// Pointer to this specific archetype's component storages vector
-    pub storage_ptr: *mut Vec<ComponentStorage>,
-    /// Maps how this query's tuple types align with THIS archetype's columns
+pub struct Read {}
+pub struct Write {}
+
+pub trait AccessMode {}
+pub trait WriteAccessMode {}
+pub trait ReadAccessMode {}
+
+impl AccessMode for Read {}
+impl AccessMode for Write {}
+
+impl WriteAccessMode for Write {}
+impl ReadAccessMode for Read {}
+
+pub trait QueryStorageState {
+    type Storage: Copy;
+    type Item<'a, Q: ComponentSet>;
+
+    unsafe fn fetch<'a, Q: ComponentSet>(
+        storage_ptr: Self::Storage,
+        indices: &[usize],
+        components_position: EntityStorageId,
+    ) -> Self::Item<'a, Q>;
+}
+
+impl QueryStorageState for Read {
+    type Storage = *const Vec<ComponentStorage>;
+    type Item<'a, Q: ComponentSet> = Q::Fetch<'a>;
+
+    unsafe fn fetch<'a, Q: ComponentSet>(
+        storage_ptr: Self::Storage,
+        indices: &[usize],
+        components_position: EntityStorageId,
+    ) -> Self::Item<'a, Q> {
+        unsafe { Q::fetch_from_pointers(storage_ptr, indices, components_position) }
+    }
+}
+
+impl QueryStorageState for Write {
+    type Storage = *mut Vec<ComponentStorage>;
+    type Item<'a, Q: ComponentSet> = Q::FetchMut<'a>;
+
+    unsafe fn fetch<'a, Q: ComponentSet>(
+        storage_ptr: Self::Storage,
+        indices: &[usize],
+        components_position: EntityStorageId,
+    ) -> Self::Item<'a, Q> {
+        unsafe { Q::fetch_from_pointers_mut(storage_ptr, indices, components_position) }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct QueryArchetypeView<S: QueryStorageState> {
+    pub storage_ptr: S::Storage,
     pub matching_indices: Vec<usize>,
-    /// The row offsets for matching entities inside THIS archetype
     pub entity_positions: Vec<EntityStorageId>,
 }
 
-pub struct Query<'a, Q: ComponentSet> {
+#[derive(Clone)]
+pub struct Query<Q: ComponentSet, S: QueryStorageState> {
     /// Views into every archetype that contains our required component subset
-    pub archetype_views: Vec<ArchetypeQueryView>,
-    pub _marker: PhantomData<&'a Q>,
+    pub(crate) archetype_views: Vec<QueryArchetypeView<S>>,
+    pub(crate) _marker: PhantomData<Q>,
 }
 
-impl<'a, Q: ComponentSet> Query<'a, Q> {
-    pub fn new(archetype_views: Vec<ArchetypeQueryView>) -> Self {
+impl<Q: ComponentSet, S: QueryStorageState> Query<Q, S> {
+    pub(crate) fn new(archetype_views: Vec<QueryArchetypeView<S>>) -> Self {
         Self {
             archetype_views,
             _marker: PhantomData,
         }
     }
 
-    pub fn iter(&mut self) -> QueryIter<'_, Q> {
+    pub fn iter(&mut self) -> QueryIter<'_, Q, S> {
         QueryIter {
             views: &self.archetype_views,
             archetype_index: 0,
@@ -140,15 +241,19 @@ impl<'a, Q: ComponentSet> Query<'a, Q> {
     }
 }
 
-pub struct QueryIter<'a, Q: ComponentSet> {
-    views: &'a [ArchetypeQueryView],
+pub struct QueryIter<'a, Q: ComponentSet, S: QueryStorageState> {
+    views: &'a [QueryArchetypeView<S>],
     archetype_index: usize,
     entity_index: usize,
     _marker: PhantomData<Q>,
 }
 
-impl<'a, Q: ComponentSet> Iterator for QueryIter<'a, Q> {
-    type Item = Q::Fetch<'a>;
+impl<'a, Q, S> Iterator for QueryIter<'a, Q, S>
+where
+    Q: ComponentSet,
+    S: QueryStorageState,
+{
+    type Item = S::Item<'a, Q>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.archetype_index < self.views.len() {
@@ -159,7 +264,7 @@ impl<'a, Q: ComponentSet> Iterator for QueryIter<'a, Q> {
                 self.entity_index += 1;
 
                 unsafe {
-                    return Some(Q::fetch_from_pointers(
+                    return Some(S::fetch::<Q>(
                         current_view.storage_ptr,
                         &current_view.matching_indices,
                         row_idx,
